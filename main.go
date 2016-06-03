@@ -5,60 +5,56 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/urfave/negroni"
 	"github.com/gorilla/mux"
-	"github.com/gorilla/context"
-	"github.com/wothing/log"
+	"github.com/urfave/negroni"
+	"golang.org/x/net/context"
 	"sourcegraph.com/sourcegraph/appdash"
-	
-	/*
-	apptracer "sourcegraph.com/sourcegraph/appdash/opentracing"
+
 	opentracing "github.com/opentracing/opentracing-go"
-	*/
+	basictracer "github.com/opentracing/basictracer-go"
+	apptracer "sourcegraph.com/sourcegraph/appdash/opentracing"
 )
 
 var collector appdash.Collector
 
 func main() {
-	collector = appdash.NewRemoteCollector(":1726")
-	tracemw := httptrace.Middleware(collector, &httptrace.MiddlewareConfig{
-		RouteName: func(r *http.Request) string { return r.URL.Path },
-		SetContextSpan: func(r *http.Request, spanID appdash.SpanID) {
-			context.Set(r, "span", spanID)
-		},
-	})
+	collector := appdash.NewRemoteCollector(":1726")
+	tracer := apptracer.NewTracer(collector)
+	opentracing.InitGlobalTracer(tracer)
 
 	router := mux.NewRouter()
 	router.HandleFunc("/", Home)
-	router.HandleFunc("/test", Test)
 
 	n := negroni.Classic()
-	n.Use(negroni.HandlerFunc(tracemw))
 	n.UseHandler(router)
 	n.Run(":8699")
 }
 
 func Home(rw http.ResponseWriter, r *http.Request) {
-	span := context.Get(r, "span").(appdash.SpanID)
-	httpClient := &http.Client{
-		Transport: &httptrace.Transport{
-			Recorder: appdash.NewRecorder(span, collector),
-			SetName: true,
-		},
-	}
+	ctx := context.Background()
+	span, ctx := opentracing.StartSpanFromContext(ctx, "HOME")
+	defer span.Finish()
+
+	span.SetTag("Request.Host", r.Host)
+	span.SetTag("Reqeust.Address", r.RemoteAddr)
+
+	span.SetBaggageItem("User", "rod")
+
 	for i := 0; i < 3; i++ {
-		resp, err := httpClient.Get("http://localhost:8699/test")
-		if err != nil {
-			log.Errorf("calling /test error: %v", err)
-			continue
-		}
-		resp.Body.Close()
+		Test(ctx)
 	}
 	fmt.Fprintf(rw, `<p>Three API requests have been made!<p>`)
-	fmt.Fprintf(rw, `<p><a href="http://localhost:8700/traces/%s" target="_">View the trace (ID:%s)</a></p>`, span.Trace, span.Trace)
+	fmt.Fprintf(rw, `<p><a href="http://localhost:8700/traces" target="_">View the trace</a></p>`)
 }
 
-func Test(rw http.ResponseWriter, r *http.Request) {
+func Test(ctx context.Context) int {
+	span, ctx := opentracing.StartSpanFromContext(ctx, "Test")
+	defer span.Finish()
+
+	span.LogEvent("before sleeping")
+	span.LogEvent(fmt.Sprintf("%016x", span.(basictracer.Span).Context().TraceID))
 	time.Sleep(200 * time.Millisecond)
-	fmt.Fprintf(rw, "Slept for 200ms!")
+	span.LogEvent("after sleeping")
+
+	return 1
 }
